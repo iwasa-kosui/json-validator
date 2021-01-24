@@ -2,18 +2,18 @@ name: ci
 on: [push, pull_request]
 jobs:
   perl:
-    runs-on: ${{matrix.os}}
+    name: "Perl ${{matrix.perl}} on ${{matrix.os}}"
     strategy:
       matrix:
-        os: ['ubuntu-latest', 'windows-latest']
-        perl: ['5.16', 'latest']
-    container:
-      image: perl:${{matrix.perl}}
+        os: ["ubuntu-latest", "windows-latest"]
+        perl: ["5.16", "latest"]
+    runs-on: "${{matrix.os}}"
     steps:
       - uses: actions/checkout@v2
-      - name: perl -V
-        run: perl -V
-      - name: Fix ExtUtils::MakeMaker (for Perl 5.16 and 5.18)
+      - uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: "${{matrix.perl}}"
+      - name: Fix ExtUtils::MakeMaker for Perl 5.16
         run: cpanm -n App::cpanminus ExtUtils::MakeMaker
       - name: Install dependencies
         run: |
