@@ -7,6 +7,14 @@ my $spec = Mojo::URL->new->scheme('file')->host('')->path($file->to_string);
 my $jv   = JSON::Validator->new;
 my $id   = File::Spec->case_tolerant ? lc $spec : $spec->to_string;
 
+diag explain {
+  case_tolerant => File::Spec->case_tolerant,
+  file          => $file,
+  id            => $id,
+  lc_spec       => lc $spec,
+  spec          => $spec->to_string,
+};
+
 note $spec->to_string;
 ok eval { $jv->schema($file) }, 'loaded from file://' or diag $@;
 isa_ok $jv->schema, 'JSON::Validator::Schema';
