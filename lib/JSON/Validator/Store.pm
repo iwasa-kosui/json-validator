@@ -41,7 +41,8 @@ sub get {
   my ($self, $id) = @_;
   return undef unless defined $id;
   $id =~ s!(.)#$!$1!;
-  return $self->schemas->{$id};
+  return $self->schemas->{$id} unless $id =~ m!^(.*)#(/.+)$!;
+  return Mojo::JSON::Pointer->new($self->schemas->{$1})->get($2);
 }
 
 sub load {

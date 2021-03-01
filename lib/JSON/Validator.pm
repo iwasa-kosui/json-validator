@@ -9,7 +9,7 @@ use JSON::Validator::Store;
 use JSON::Validator::Util qw(E data_checksum data_type is_type json_pointer prefix_errors schema_type);
 use List::Util qw(uniq);
 use Mojo::File qw(path);
-use Mojo::JSON qw(false true);
+use Mojo::JSON qw(decode_json encode_json false true);
 use Mojo::URL;
 use Mojo::Util qw(sha1_sum);
 use Scalar::Util qw(blessed refaddr);
@@ -45,71 +45,50 @@ for my $method (qw(cache_paths ua)) {
 
 sub bundle {
   my ($self, $args) = @_;
-  my $cloner;
 
-  my $get_data  = $self->can('data') ? 'data' : 'schema';
-  my $schema    = $self->_new_schema($args->{schema} || $self->$get_data);
-  my $schema_id = $schema->id;
-  my @topics    = ([$schema->data, my $bundle = {}]);                        # ([$from, $to], ...);
+  my $schema = $args->{schema} ? $self->_new_schema($args->{schema}) : $self->can('data') ? $self : $self->schema;
+  return $schema->data if is_type $schema->data, 'BOOL';
 
-  if ($args->{replace}) {
-    $cloner = sub {
-      my $from      = shift;
-      my $from_type = ref $from;
-      my $tied      = $from_type eq 'HASH' && tied %$from;
+  local $self->store->schemas->{''} = $self->can('data') ? $self->data : $self->schema->data;
+  my @topics = ([$schema->id, $schema->data, my $bundled = {}]);
+  while (my $topic = shift @topics) {
+    my $source = $topic->[1];
 
-      $from = $tied->schema if $tied;
-      my $to = $from_type eq 'ARRAY' ? [] : $from_type eq 'HASH' ? {} : $from;
-      push @topics, [$from, $to] if $from_type;
-      return $to;
-    };
-  }
-  else {
-    $cloner = sub {
-      my $from      = shift;
-      my $from_type = ref $from;
-      my $tied      = $from_type eq 'HASH' && tied %$from;
-
-      unless ($tied) {
-        my $to = $from_type eq 'ARRAY' ? [] : $from_type eq 'HASH' ? {} : $from;
-        push @topics, [$from, $to] if $from_type;
-        return $to;
-      }
-
-      # Traverse all $ref
-      while (my $tmp = tied %{$tied->schema}) { $tied = $tmp }
-
-      return $from if !$args->{schema} and $tied->fqn =~ m!^\Q$schema_id\E\#!;
-
-      my $path = $self->_definitions_path($bundle, $tied);
-      unless ($self->{bundled_refs}{$tied->fqn}++) {
-        push @topics, [_node($schema->data, $path, 1, 0) || {}, _node($bundle, $path, 1, 1)];
-        push @topics, [$tied->schema, _node($bundle, $path, 0, 1)];
-      }
-
-      $path = join '/', '#', @$path;
-      tie my %ref, 'JSON::Validator::Ref', $tied->schema, $path;
-      return \%ref;
-    };
-  }
-
-  local $self->{bundled_refs} = {};
-
-  while (@topics) {
-    my ($from, $to) = @{shift @topics};
-    if (ref $from eq 'ARRAY') {
-      for (my $i = 0; $i < @$from; $i++) {
-        $to->[$i] = $cloner->($from->[$i]);
+    if (ref $source eq 'ARRAY') {
+      for my $i (@$source) {
+        my $type = ref $source->[$i];
+        $topic->[2][$i] = $type eq 'ARRAY' ? [] : $type eq 'HASH' ? {} : $source->[$i];
+        unshift @topics, [$topic->[0], $source->[$i], $topic->[2][$i]] if $type eq 'ARRAY' or $type eq 'HASH';
       }
     }
-    elsif (ref $from eq 'HASH') {
-      for my $key (keys %$from) {
-        $to->{$key} //= $cloner->($from->{$key});
+    elsif (ref $source eq 'HASH') {
+      for my $k (keys %$source) {
+        my $type = ref $source->{$k};
+
+        if ($type eq 'HASH' and $source->{$k}{'$ref'} and !ref $source->{$k}{'$ref'}) {
+          my ($other, $ref_url, $fqn) = $self->_resolve_ref($source->{$k}{'$ref'}, $topic->[0], $schema->data);
+          my $definitions_path = $self->_definitions_path_for_ref($fqn)->[0];
+          my $definitions_name = $fqn->fragment =~ m!^/\Q$definitions_path\E/(.*)! ? $1 : $fqn->to_abs;
+
+          $topic->[2]{$k} = {'$ref' => sprintf '#/%s/%s', $definitions_path, $definitions_name};
+          next if $bundled->{$definitions_path}{$definitions_name};
+
+          $bundled->{$definitions_path}{$definitions_name} ||= {};
+          $bundled->{$definitions_path}{$definitions_name}{'$id'} = $fqn->to_string if $fqn->scheme;
+          unshift @topics, [$fqn->fragment(undef), $other, $bundled->{$definitions_path}{$definitions_name}];
+        }
+        else {
+          $topic->[2]{$k} = $type eq 'ARRAY' ? [] : $type eq 'HASH' ? {} : $source->{$k};
+          unshift @topics, [$topic->[0], $source->{$k}, $topic->[2]{$k}] if $type eq 'ARRAY' or $type eq 'HASH';
+        }
       }
+    }
+    else {
+      $topic->[2] = $source;
     }
   }
 
-  return $bundle;
+  return $bundled;
 }
 
 sub coerce {
@@ -198,38 +177,6 @@ sub _build_formats {
     'uri-template'          => JSON::Validator::Formats->can('check_uri_template'),
     'uuid'                  => JSON::Validator::Formats->can('check_uuid'),
   };
-}
-
-sub _definitions_path {
-  my ($self, $bundle, $ref) = @_;
-  my $path = $self->_definitions_path_for_ref($ref);
-
-  # No need to rewrite, if it already has a nice name
-  my $node   = _node($bundle, $path, 2, 0);
-  my $prefix = join '/', @$path;
-  if ($ref->fqn =~ m!#/$prefix/([^/]+)$!) {
-    my $key = $1;
-
-    if ( $self->{bundled_refs}{$ref->fqn}
-      or !$node
-      or !$node->{$key}
-      or data_checksum($ref->schema) eq data_checksum($node->{$key}))
-    {
-      return [@$path, $key];
-    }
-  }
-
-  # Generate definitions key based on filename
-  my $fqn = Mojo::URL->new($ref->fqn);
-  my $key = $fqn->fragment;
-  if ($fqn->scheme and $fqn->scheme eq 'file') {
-    $key = join '-', map { s!^\W+!!; $_ } grep {$_} path($fqn->path)->basename, $key,
-      substr(sha1_sum($fqn->path), 0, 10);
-  }
-
-  # Fallback or nicer path name
-  $key =~ s![^\w-]!_!g;
-  return [@$path, $key];
 }
 
 sub _definitions_path_for_ref { $_[0]->schema ? $_[0]->schema->_definitions_path_for_ref(@_) : ['definitions'] }
@@ -380,14 +327,8 @@ sub _resolve_ref {
 
   $fqn = $fqn->to_abs($base_url) if "$base_url";
   $other //= $self->store->get($fqn);
-  $other //= $self->store->get($fqn->clone->fragment(undef));
   $other //= $self->_resolve($fqn->clone->fragment(undef), 1) if $fqn->is_abs && $fqn ne $base_url;
   $other //= $schema;
-
-  if (defined $pointer and $pointer =~ m!^/!) {
-    $other = Mojo::JSON::Pointer->new($other)->get($pointer);
-    confess qq[Possibly a typo in schema? Could not find "$pointer" in "$fqn" ($ref_url)] unless defined $other;
-  }
 
   $fqn->fragment($pointer // '');
   return $other, $ref_url, $fqn;
@@ -1092,7 +1033,7 @@ DEPRECATED.
 
 Used to create a new schema, where there are no "$ref" pointing to external
 resources. This means that all the "$ref" that are found, will be moved into
-the "definitions" key, in the returned C<$schema>.
+designated definition sections in the returned C<$schema>.
 
 =head2 coerce
 

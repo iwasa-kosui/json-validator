@@ -21,14 +21,12 @@ bundle_test(
   'find and resolve nested $refs; main schema is at the top level',
   'i_have_nested_refs',
   {
-    definitions => {
-      ref1 => {type => 'array',  items     => {'$ref' => '#/definitions/ref2'}},
-      ref2 => {type => 'string', minLength => 1},
-    },
+    '$defs' =>
+      {ref1 => {type => 'array', items => {'$ref' => '#/$defs/ref2'}}, ref2 => {type => 'string', minLength => 1}},
 
     # begin i_have_nested_refs definition
     type       => 'object',
-    properties => {my_key1 => {'$ref' => '#/definitions/ref1'}, my_key2 => {'$ref' => '#/definitions/ref1'}},
+    properties => {my_key1 => {'$ref' => '#/$defs/ref1'}, my_key2 => {'$ref' => '#/$defs/ref1'}},
   },
 );
 
@@ -36,12 +34,12 @@ bundle_test(
   'find and resolve recursive $refs',
   'i_have_a_recursive_ref',
   {
-    definitions => {
+    '$defs' => {
       i_have_a_recursive_ref => {
         type       => 'object',
         properties => {
           name     => {type => 'string'},
-          children => {type => 'array', items => {'$ref' => '#/definitions/i_have_a_recursive_ref'}, default => []},
+          children => {type => 'array', items => {'$ref' => '#/$defs/i_have_a_recursive_ref'}, default => []},
         },
       },
     },
@@ -52,7 +50,7 @@ bundle_test(
     type       => 'object',
     properties => {
       name     => {type => 'string'},
-      children => {type => 'array', items => {'$ref' => '#/definitions/i_have_a_recursive_ref'}, default => []},
+      children => {type => 'array', items => {'$ref' => '#/$defs/i_have_a_recursive_ref'}, default => []},
     },
   },
 );
@@ -61,11 +59,11 @@ bundle_test(
   'find and resolve references to other local files',
   'i_have_a_ref_to_another_file',
   {
-    definitions => {
-      my_name => {type => 'string', minLength => 2},
+    '$defs' => {
+      my_name    => {type => 'string', minLength => 2},
       my_address =>
-        {type => 'object', properties => {street => {type => 'string'}, city => {'$ref' => '#/definitions/my_name'}},},
-      ref1 => {type => 'array',  items     => {'$ref' => '#/definitions/ref2'}},
+        {type => 'object', properties => {street => {type => 'string'}, city => {'$ref' => '#/$defs/my_name'}}},
+      ref1 => {type => 'array',  items     => {'$ref' => '#/$defs/ref2'}},
       ref2 => {type => 'string', minLength => 1},
     },
 
@@ -74,22 +72,23 @@ bundle_test(
     properties => {
 
       # these ref targets are rewritten
-      name    => {'$ref' => '#/definitions/my_name'},
-      address => {'$ref' => '#/definitions/my_address'},
-      secrets => {'$ref' => '#/definitions/ref1'},
+      name    => {'$ref' => '#/$defs/my_name'},
+      address => {'$ref' => '#/$defs/my_address'},
+      secrets => {'$ref' => '#/$defs/ref1'},
     },
   },
 );
+exit;
 
 bundle_test(
   'find and resolve references where the definition itself is a ref',
   'i_am_a_ref',
   {
-    definitions => {ref2 => {type => 'string', minLength => 1}},
+    '$defs' => {ref2 => {type => 'string', minLength => 1}},
 
     # begin i_am_a_ref definition - which is actually ref1
     type  => 'array',
-    items => {'$ref' => '#/definitions/ref2'},
+    items => {'$ref' => '#/$defs/ref2'},
   },
 );
 
@@ -106,11 +105,11 @@ bundle_test(
   '$refs which are simply $refs themselves are traversed automatically during resolution',
   'i_have_refs_with_the_same_name',
   {
-    definitions => {i_am_a_ref_with_the_same_name => {type => 'string'}},
+    '$defs' => {i_am_a_ref_with_the_same_name => {type => 'string'}},
 
     # begin i_have_a_ref_with_the_same_name definition
     type       => 'object',
-    properties => {me => {'$ref' => '#/definitions/i_am_a_ref_with_the_same_name'}},
+    properties => {me => {'$ref' => '#/$defs/i_am_a_ref_with_the_same_name'}},
   },
 );
 
@@ -128,7 +127,7 @@ bundle_test(
   'when encountering references that have the same root name, one is renamed',
   'i_contain_refs_to_same_named_definitions',
   {
-    definitions => code(sub {
+    '$defs' => code(sub {
       my $got = shift;
       return (0, 'expected hash with 2 keys') unless ref($got) eq 'HASH' and keys %$got == 2;
       return (0, 'missing "dupe_name" key') if not exists $got->{dupe_name};
@@ -148,8 +147,8 @@ bundle_test(
     # begin i_contain_refs_to_same_named_definitions definition
     type       => 'object',
     properties => {
-      foo => {'$ref' => re(qr/^#\/definitions\/(dupe_name|more-bundle_yaml-.*)$/)},
-      bar => {'$ref' => re(qr/^#\/definitions\/(dupe_name|more-bundle2_yaml-.*)$/)},
+      foo => {'$ref' => re(qr/^#\/\$defs\/(dupe_name|more-bundle_yaml-.*)$/)},
+      bar => {'$ref' => re(qr/^#\/\$defs\/(dupe_name|more-bundle2_yaml-.*)$/)},
     },
   },
 );
@@ -163,9 +162,8 @@ bundle_test(
     # begin i_have_a_ref_with_the_same_name definition
     type       => 'object',
     properties => {
-      name => {type => 'string'},
-      children =>
-        {type => 'array', items => {'$ref' => '#/definitions/i_have_a_ref_with_the_same_name'}, default => []},
+      name     => {type => 'string'},
+      children => {type => 'array', items => {'$ref' => '#/$defs/i_have_a_ref_with_the_same_name'}, default => []},
     },
   },
 );
@@ -179,20 +177,20 @@ bundle_test(
     # begin i_am_a_ref_to_another_file definition - which is actually
     # i_have_a_ref_to_the_first_filename
     type       => 'object',
-    properties => {gotcha => {'$ref' => '#/definitions/ref3'}},
+    properties => {gotcha => {'$ref' => '#/$defs/ref3'}},
   },
 );
 
 done_testing;
 
 sub bundle_test {
-  my ($desc, $schema_name, $expected_output) = @_;
-  subtest $desc => sub {
+  my ($desc, $schema_name, $exp) = @_;
 
-    my $partial = $bundler_validator->get("/definitions/$schema_name");
+  subtest $desc => sub {
+    my $partial = $bundler_validator->get("/\$defs/$schema_name");
     my $got     = $bundler_validator->bundle({schema => $partial});
-    cmp_deeply($got, $expected_output, 'extracted schema for ' . $schema_name)
-      or diag 'got: ', explain([$partial, $got]);
+    cmp_deeply($got, $exp, "extracted schema for $schema_name")
+      or diag 'got: ', explain({"/\$defs/$schema_name" => $partial, exp => $exp, got => $got});
 
     my @errors = $draft7_validator->validate($got);
     ok !@errors, 'bundled schema conforms to the draft 7 spec';
@@ -201,7 +199,7 @@ sub bundle_test {
     $fresh_draft7_validator->load_and_validate_schema($got, {schema => 'http://json-schema.org/draft-07/schema#'});
     cmp_deeply(
       $fresh_draft7_validator->schema->data,
-      $expected_output, 'our generated schema does not lose any data when parsed again by a new validator',
+      $exp, 'our generated schema does not lose any data when parsed again by a new validator',
     );
   };
 }

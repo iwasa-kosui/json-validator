@@ -1,6 +1,7 @@
 Revision history for perl distribution JSON-Validator
 
 4.15 Not Released
+ - Fix placing draf7-07 definitions under "$defs" instead of "definitions"
  - Removed deprecated functions joi() and validate_json()
  - Removed deprecated methods singleton() and version()
 
