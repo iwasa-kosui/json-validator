@@ -2,13 +2,15 @@ package JSON::Validator::Schema;
 use Mojo::Base 'JSON::Validator';    # TODO: Change this to "use Mojo::Base -base"
 
 use Carp 'carp';
-use JSON::Validator::Util qw(E is_type);
+use JSON::Validator::Util qw(E is_type schema_type);
 use Mojo::JSON::Pointer;
+use Mojo::URL;
+use Scalar::Util qw(blessed refaddr);
 
 has errors => sub {
   my $self      = shift;
   my $url       = $self->specification || 'http://json-schema.org/draft-04/schema#';
-  my $validator = $self->new(%$self)->resolve($url);
+  my $validator = $self->new(%$self)->id($url)->resolve($url);
 
   return [$validator->validate($self->resolve->data)];
 };
@@ -23,6 +25,8 @@ has moniker => sub {
   return "draft$1" if $self->specification =~ m!draft-(\d+)!;
   return '';
 };
+
+has refs => sub { shift->_build_refs };
 
 has specification => sub {
   my $data = shift->data;
@@ -44,6 +48,7 @@ sub data {
   my $self = shift;
   return $self->{data} //= {} unless @_;
   $self->{data} = shift;
+  $self->refs($self->_build_refs);
   delete $self->{errors};
   return $self;
 }
@@ -63,19 +68,66 @@ sub new {
 }
 
 sub resolve {
-  my $self = shift;
-  return $self->data($self->_resolve(@_ ? shift : $self->{data}));
-}
+  my $self   = shift;
+  my $source = @_ ? shift : $self->data;
 
-sub validate {
-  my ($self, $data, $schema) = @_;
-  local $self->{schema}      = $self;    # back compat: set $jv->schema()
-  local $self->{seen}        = {};
-  local $self->{temp_schema} = [];       # make sure random-errors.t does not fail
-  return $self->_validate($_[1], '', $schema || $self->data);
+  my $loadable
+    = (blessed $source && ($source->can('scheme') || $source->isa('Mojo::File')))
+    || ($source !~ /\n/ && -f $source)
+    || (!ref $source && $source =~ /^\w/);
+
+  if ($loadable) {
+    my $id = $self->store->load($source);
+    $self->id($id) unless $self->{id};
+    $self->data($self->store->get($id));
+  }
+  elsif ($source) {
+    $self->data($source);
+  }
+
+  for my $ref (values %{$self->refs}) {
+    $self->store->load($ref->{base}) if $ref->{base} && !$self->store->get($ref->{base});
+  }
+
+  return $self;
 }
 
 sub schema { $_[0]->can('data') ? $_[0] : $_[0]->SUPER::schema }
+
+sub validate {
+  my $self = $_[0];
+  local $self->{seen}        = {};
+  local $self->{temp_schema} = [];    # make sure random-errors.t does not fail
+  my @e = sort { $a->path cmp $b->path } $self->_validate($_[1], '', $self->data);
+  return @e;                          # Force sort() to return a list
+}
+
+sub _build_refs {
+  my $self = shift;
+
+  my $base_url = Mojo::URL->new($self->id);
+  my (@topics, %refs) = (['', $self->data]);
+  while (@topics) {
+    my $topic = shift @topics;
+
+    if (ref $topic->[1] eq 'ARRAY') {
+      my $i = 0;
+      push @topics, [sprintf('%s/%s', $topic->[1], $i++), $_] for @{$topic->[1]};
+    }
+    elsif (ref $topic->[1] eq 'HASH') {
+      for my $k (sort keys %{$topic->[1]}) {
+        if ($k eq '$ref' and !ref $topic->[1]{'$ref'}) {
+          $refs{$topic->[1]{'$ref'}} = $self->_resolve_ref($base_url, $topic->[1]{'$ref'});
+        }
+        else {
+          unshift @topics, ["$topic->[0]/$k", $topic->[1]{$k}];
+        }
+      }
+    }
+  }
+
+  return \%refs;
+}
 
 sub _definitions_path_for_ref { ['definitions'] }
 
@@ -86,6 +138,81 @@ sub _register_root_schema {
   $self->SUPER::_register_root_schema($id => $schema);
   $self->id($id) unless $self->id;
 }
+
+sub _resolve_ref {
+  my ($self, $base_url, $ref_url) = @_;
+  $ref_url = "#$ref_url" if $ref_url =~ m!^/!;
+
+  my $other_fqn = Mojo::URL->new($ref_url);
+  $other_fqn = $other_fqn->to_abs($base_url) if "$base_url";
+
+  my $other_base = $other_fqn->clone->fragment(undef);
+  my $other;
+  $other //= $self if Mojo::URL->new($self->id)->fragment(undef) eq $other_base;
+  $other //= $self->store->get_obj($other_base);
+  $other //= $self->store->get_obj($self->store->load($other_base));
+
+  my $ref_schema = $other->get($other_fqn->fragment);
+  return {path => $other_fqn->fragment, ref_schema => $ref_schema, schema => $other};
+}
+
+sub _validate {
+  my ($self, $data, $path, $schema) = @_;
+  return $schema ? () : E $path, [not => 'not'] if is_type $schema, 'BOOL';
+
+  if ($schema->{'$ref'} and my $ref = $self->refs->{$schema->{'$ref'}}) {
+    return $ref->{schema}->_validate($_[1], $path, $ref->{ref_schema});
+  }
+
+  my @errors;
+  if ($self->recursive_data_protection) {
+    my $seen_addr = join ':', refaddr($schema), (ref $data ? refaddr $data : ++$self->{seen}{scalar});
+    return @{$self->{seen}{$seen_addr}} if $self->{seen}{$seen_addr};    # Avoid recursion
+    $self->{seen}{$seen_addr} = \@errors;
+  }
+
+  local $_[1] = $data->TO_JSON if blessed $data and $data->can('TO_JSON');
+
+  if (my $rules = $schema->{not}) {
+    my @e = $self->_validate($_[1], $path, $rules);
+    push @errors, E $path, [not => 'not'] unless @e;
+  }
+  if (my $rules = $schema->{allOf}) {
+    push @errors, $self->_validate_all_of($_[1], $path, $rules);
+  }
+  if (my $rules = $schema->{anyOf}) {
+    push @errors, $self->_validate_any_of($_[1], $path, $rules);
+  }
+  if (my $rules = $schema->{oneOf}) {
+    push @errors, $self->_validate_one_of($_[1], $path, $rules);
+  }
+  if (exists $schema->{if}) {
+    my $rules = !$schema->{if} || $self->_validate($_[1], $path, $schema->{if}) ? $schema->{else} : $schema->{then};
+    push @errors, $self->_validate($_[1], $path, $rules // {});
+  }
+
+  my $type = $schema->{type} || schema_type $schema, $_[1];
+  if (ref $type eq 'ARRAY') {
+    push @{$self->{temp_schema}}, [map { +{%$schema, type => $_} } @$type];
+    push @errors, $self->_validate_any_of_types($_[1], $path, $self->{temp_schema}[-1]);
+  }
+  elsif ($type) {
+    my $method = sprintf '_validate_type_%s', $type;
+    push @errors, $self->$method($_[1], $path, $schema);
+  }
+
+  return @errors if @errors;
+
+  if (exists $schema->{const}) {
+    push @errors, $self->_validate_type_const($_[1], $path, $schema);
+  }
+  if ($schema->{enum}) {
+    push @errors, $self->_validate_type_enum($_[1], $path, $schema);
+  }
+
+  return @errors;
+}
+
 
 1;
 

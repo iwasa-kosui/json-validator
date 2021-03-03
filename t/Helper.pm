@@ -1,13 +1,13 @@
 package t::Helper;
 use Mojo::Base -base;
 
-use JSON::Validator;
+use JSON::Validator::Schema::Draft7;
 use Mojo::File;
 use Mojo::JSON qw(decode_json encode_json);
 use Mojo::Util qw(monkey_patch);
 use Test::More;
 
-$ENV{TEST_VALIDATOR_CLASS} = 'JSON::Validator';
+$ENV{TEST_VALIDATOR_CLASS} = 'JSON::Validator::Schema::Draft7';
 
 sub acceptance {
   my ($class, $schema_class, %acceptance_params) = @_;
@@ -90,7 +90,7 @@ sub test {
 sub validate_ok {
   my ($data, $schema, @expected) = @_;
   my $description = @expected ? "errors: @expected" : "valid: " . encode_json($data);
-  my @errors      = jv()->schema($schema)->validate($data);
+  my @errors      = jv()->data($schema)->validate($data);
   local $Test::Builder::Level = $Test::Builder::Level + 1;
   Test::More::is_deeply([map { $_->TO_JSON } sort { $a->path cmp $b->path } @errors],
     [map { $_->TO_JSON } sort { $a->path cmp $b->path } @expected], $description)

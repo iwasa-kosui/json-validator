@@ -14,6 +14,15 @@ use constant CASE_TOLERANT => File::Spec->case_tolerant;
 
 die $@ unless eval q(package JSON::Validator::Exception; use Mojo::Base 'Mojo::Exception'; 1);
 
+our %SHEMA2CLASS = map { ($_->[0], "JSON::Validator::Schema::$_->[1]") } (
+  ['http://json-schema.org/draft-04/schema#'             => 'Draft4'],
+  ['http://json-schema.org/draft-06/schema#'             => 'Draft6'],
+  ['http://json-schema.org/draft-07/schema#'             => 'Draft7'],
+  ['https://json-schema.org/draft/2019-09/schema'        => 'Draft201909'],
+  ['http://swagger.io/v2/schema.json'                    => 'OpenAPIv2'],
+  ['https://spec.openapis.org/oas/3.0/schema/2019-04-02' => 'OpenAPIv3'],
+);
+
 has cache_paths => sub { [split(/:/, $ENV{JSON_VALIDATOR_CACHE_PATH} || ''), BUNDLED_PATH] };
 has schemas     => sub { +{} };
 
@@ -44,6 +53,14 @@ sub get {
   return $self->schemas->{$id};
 }
 
+sub get_obj {
+  my ($self, $id) = @_;
+  return undef unless defined $id;
+  $id =~ s!(.)#$!$1!;
+  return undef unless my $data = $self->schemas->{$id};
+  return $self->{instances} //= _guess_schema_class($data)->new->data($data);
+}
+
 sub load {
   return
        $_[0]->_load_from_url($_[1])
@@ -53,6 +70,25 @@ sub load {
     || $_[0]->_load_from_app($_[1])
     || $_[0]->get($_[1])
     || _raise("Unable to load schema $_[1]");
+}
+
+sub _guess_schema_class {
+  my $data = shift;
+
+  state $load = sub { eval "require $_[0];'$_[0]'" or Carp::confess "Could not load $_[0]: $@" };
+
+  # Known schema from specification
+  return $load->($SHEMA2CLASS{$data->{'$schema'}}) if $data->{'$schema'} and $SHEMA2CLASS{$data->{'$schema'}};
+
+  # Detect openapiv2 and v3 schemas by content, since no "$schema" is present
+  if ($data->{paths} && !$data->{'$schema'}) {
+    return $load->('JSON::Validator::Schema::OpenAPIv2') if $data->{swagger} and $data->{swagger} eq '2.0';
+    return $load->('JSON::Validator::Schema::OpenAPIv3') if $data->{openapi} and $data->{openapi} =~ m!^3\.0\.\d+$!;
+  }
+
+  # Fallback
+  return $load->('JSON::Validator::Schema::Draft6') if $data->{'$id'};
+  return $load->('JSON::Validator::Schema::Draft4');
 }
 
 sub _load_from_app {
@@ -209,6 +245,13 @@ Returns a C<$normalized_id> if it is present in the L</schemas>.
   my $schema = $store->get($normalized_id);
 
 Used to retrieve a C<$schema> added by L</add> or L</load>.
+
+=head2 get_obj
+
+  my $schema = $store->get_obj($id);
+
+Returns the schema by id as a L<JSON::Validator::Schema> object. Note that the
+object returned will be the same for every time this method is called.
 
 =head2 load
 
