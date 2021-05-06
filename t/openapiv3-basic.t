@@ -104,7 +104,7 @@ subtest 'validate_request' => sub {
 
 subtest 'validate_response' => sub {
   $body   = {exists => 1, value => {id => 42, name => 'kitty'}};
-  @errors = $schema->validate_response([POST => '/pets', 201], {});
+  @errors = $schema->validate_response([POST => '/pets', 201], {body => \&body});
   is "@errors", '', 'valid response body 201';
 
   $body   = {exists => 1, value => {code => 42}};
